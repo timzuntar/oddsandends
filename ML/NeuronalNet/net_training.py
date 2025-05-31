@@ -4,8 +4,11 @@ Disclaimer: The datareader helper function has been reproduced from work by Yann
 
 import sys
 import struct
-import numpy as np
 import math
+import pickle
+
+import matplotlib.pyplot as plt
+import numpy as np
 
 
 ## read images and labels from binary files, one by one (generator function) ##
@@ -50,61 +53,169 @@ def backpropagate(output,control,w_matrices,activation_values):
 
     return E,list(reversed(gradients))
 
-def update_weights(w_matrices,gradients,vector_values,learning_rate):
-    # for now, no updates are made to the biases
+def update_weights(w_matrices,gradients,vector_values,learning_rate,bias_vectors=None):
+    # If updates should not be passed to biases, they can be left out
 
     for i in range(len(w_matrices)):
         w_matrices[i] = w_matrices[i]+learning_rate*np.outer(gradients[i],vector_values[i])
-    return w_matrices
+    
+    if bias_vectors is not None:
+        for i in range(len(bias_vectors)-1): # the biases of the final layer must be equal and identical to 0
+            bias_vectors[i] = bias_vectors[i] + learning_rate*gradients[i]
 
-#num_training_samples = len(list(datareader("train-images-idx3-ubyte","train-labels-idx1-ubyte")))
-#num_test_samples = len(list(datareader("t10k-images-idx3-ubyte","t10k-labels-idx1-ubyte")))
+    return w_matrices,bias_vectors
+
+def hallucinate(acceptable_diff,max_iters,dimensions,classification,learning_rate,weight_matrices,bias_vectors):
+    # takes a trained NN and reconstructs the platonic ideal of one of its classifiers
+    # classification is meant to just be the corresponding index in the output vector
+
+    blank_slate_input = np.zeros(dimensions[0]*dimensions[1])
+
+    output = np.full(10,-1.0)
+    output[classification] = 1.0
+
+    for k in range(max_iters):
+
+        out_vec,act_val,vec_val = step_fwd(blank_slate_input,weight_matrices,bias_vectors)
+        diff = np.sum(np.abs(output-out_vec))
+        print(diff)
+        if diff < acceptable_diff:
+            print("Converged after %d iterations." % k)
+            break
+        E,grad_val = backpropagate(out_vec,output,weight_matrices,act_val)
+        # now update the input image
+        blank_slate_input = blank_slate_input + learning_rate*np.matmul(grad_val[0],weight_matrices[0])
+
+    return blank_slate_input
+
+
+#######################################################
+# Let's define some constants and parameters
+
+image_dimensions = [28,28]
+parameter_set_name = "testpars"
 
 layer_sizes = [784,784,28,10]   # input and output layers are included, so the number of hidden layers is len-2
 learning_rate = 0.01
 
 weight_matrices = []
 bias_vectors = []
-# Generates initial random weights
-for i in range(0,len(layer_sizes)-1):
-    weights = np.random.normal(0.0,2.0/layer_sizes[i+1],size=(layer_sizes[i+1],layer_sizes[i]))
-    bias = np.full(layer_sizes[i+1],0.0)
-    weight_matrices.append(weights)
-    bias_vectors.append(bias)
 
-# The first implementation is going to be a fully stochastic gradient descent
-# Training
-k = 0
-for image,label in datareader("train-images-idx3-ubyte","train-labels-idx1-ubyte"):
+training_dataset = "train-images-idx3-ubyte"
+training_labels = "train-labels-idx1-ubyte"
+testing_dataset = "t10k-images-idx3-ubyte"
+testing_labels = "t10k-labels-idx1-ubyte"
 
-    rescaled = np.divide(image,255)
-    control = np.full(10,-1.0)
-    control[label] = 1.0
+# Here, the operator is trusted to not exceed the amount of training data actually included in the database
+training_examples_to_use = 1000
+test_examples_to_use = 50
 
-    out_vec,act_val,vec_val = step_fwd(rescaled,weight_matrices,bias_vectors)
-    E,grad_val = backpropagate(out_vec,control,weight_matrices,act_val)
-    weight_matrices = update_weights(weight_matrices,grad_val,vec_val,learning_rate)
-    
-    k += 1
-    if k > 10000:
-        print(out_vec-control)
-        break
+# First, we will check if the network has already learned from these data and parameters
+# If a saved set by the same name already exists, open and compare it
+
+try:
+    prev_result = []
+    with open("output/"+parameter_set_name+"_trained.pkl", "rb") as f:
+        for _ in range(pickle.load(f)):
+            prev_result.append(pickle.load(f))
+
+    if [layer_sizes,learning_rate,[training_dataset,testing_dataset],[training_examples_to_use,test_examples_to_use]] == prev_result[0:4]:
+        print("The network has already been trained for this set of parameters! Skipping to evaluation...")
+        trained_network_exists = True
+        weight_matrices = prev_result[4]
+        bias_vectors = prev_result[5]
+        error_values = prev_result[6]
+        accuracies = prev_result[7]
+        max_mismatches = prev_result[8]
+    else:
+        trained_network_exists = False
+except:
+    trained_network_exists = False
+
+if trained_network_exists != True:
+    # Generates initial random weights
+    for i in range(0,len(layer_sizes)-1):
+        weights = np.random.normal(0.0,2.0/layer_sizes[i+1],size=(layer_sizes[i+1],layer_sizes[i]))
+        bias = np.full(layer_sizes[i+1],0.0)
+        weight_matrices.append(weights)
+        bias_vectors.append(bias)
+
+    # The first implementation is going to be a fully stochastic gradient descent
+    # Training
+
+    error_values = []
+    accuracies = []
+    max_mismatches = []
+
+    accuracy = 0
+
+    k = 0
+    for image,label in datareader(training_dataset,training_labels):
+
+        rescaled = np.divide(image,255)
+        control = np.full(10,-1.0)
+        control[label] = 1.0
+
+        out_vec,act_val,vec_val = step_fwd(rescaled,weight_matrices,bias_vectors)
+        
+        guess = np.argmax(out_vec)
+        if (guess == label):
+            correct = 1
+        else: correct = 0
+        accuracy = (accuracy*k+correct)/(k+1) #probability of correct prediction based on all predictions to this point
+
+        E,grad_val = backpropagate(out_vec,control,weight_matrices,act_val)
+        largest_mismatch = np.max(np.abs(out_vec-control))  # component with largest difference to correct values
+
+        weight_matrices,bias_vectors = update_weights(weight_matrices,grad_val,vec_val,learning_rate,bias_vectors)
+
+        error_values.append(E)
+        accuracies.append(accuracy)
+        max_mismatches.append(largest_mismatch)        
+
+        k += 1
+        if k > training_examples_to_use:
+            break
+
+    # save the trained parameters for later use
+    output_data = [
+        layer_sizes,learning_rate,[training_dataset,testing_dataset],[training_examples_to_use,test_examples_to_use],
+        weight_matrices,bias_vectors,error_values,accuracies,max_mismatches]
+
+    with open("output/"+parameter_set_name+"_trained.pkl", "wb") as f:
+        pickle.dump(len(output_data), f)
+        for value in output_data:
+            pickle.dump(value, f)
+
+print("Training is finished. Testing network...")
+
+acceptable_diff = 1.0
+max_iters = 10000
+ideal_zero = hallucinate(acceptable_diff,max_iters,image_dimensions,6,learning_rate,weight_matrices,bias_vectors)
+
+plt.imshow(np.reshape(ideal_zero,(28,28)))
+plt.show()
 
 # Testing
 i_am_confusion = np.zeros((10,10))
 class_numbers = np.zeros(10,dtype=int)
 
 l = 0
-for testimage,testlabel in datareader("t10k-images-idx3-ubyte","t10k-labels-idx1-ubyte"):
+for testimage,testlabel in datareader(testing_dataset,testing_labels):
     rescaled = np.divide(testimage,255)
     out_vec,_,_ = step_fwd(rescaled,weight_matrices,bias_vectors)
     class_numbers[testlabel] += 1   # increment the correct class
     i_am_confusion[testlabel,np.argmax(out_vec)] += 1
     l += 1
-    if l > 1000:
+    if l > test_examples_to_use:
         break
 
 for i in range(10):
-    i_am_confusion[i,:] = np.divide(i_am_confusion[i,:],class_numbers[i])
+    if class_numbers[i] > 0:
+        i_am_confusion[i,:] = np.divide(i_am_confusion[i,:],class_numbers[i])
 
-# evaluation of results and implementation of bias and/or different hidden layer sizes is to follow.
+print(i_am_confusion)
+
+#plt.imshow(i_am_confusion)
+#plt.show()
+# evaluation of results, implementation of different hidden layer sizes as well as is to follow.
