@@ -21,6 +21,31 @@ def datareader(imagename,labelname):
         for i in range(length):
             yield np.frombuffer(images.read(w*h),dtype='uint8'),labels.read(1)[0]
 
+def check_distribution(datareader):
+    #Assumes that the classes are labeled with integers.
+    all_labels = []
+    for _,label in datareader:
+        all_labels.append(label)
+    
+    all_labels = np.asarray(all_labels)
+    unique_labels = np.unique(all_labels)
+    cumulants = np.empty((len(all_labels),len(unique_labels)))
+
+    for i in range(len(unique_labels)):
+        cumulants[:,i] = (all_labels == unique_labels[i]).cumsum()
+
+    return cumulants
+
+def cumulant_plot(cumulants,expected_prevalences,scale_to_sqrtn = False):
+    # shows the deviation from the expected (perfectly shuffled) distribution of the training data classes
+    for i in range(len(expected_prevalences)):
+        if scale_to_sqrtn == True:
+            plt.plot(np.arange(len(cumulants[:,i])),(cumulants[:,i]-np.arange(len(cumulants[:,i]))*expected_prevalences[i]/len(cumulants[:,i]))/np.sqrt(np.arange(len(cumulants[:,i]))+1))
+        else:
+            plt.plot(np.arange(len(cumulants[:,i])),cumulants[:,i])
+    plt.show()
+    return 0
+
 def softmax(weights,vector,bias):
     # activation function between network layers
     return np.tanh(np.matmul(weights,vector)+bias)
@@ -93,10 +118,10 @@ def hallucinate(acceptable_diff,max_iters,dimensions,classification,learning_rat
 # Let's define some constants and parameters
 
 image_dimensions = [28,28]
-parameter_set_name = "testpars"
+parameter_set_name = "full_slow_learning"
 
 layer_sizes = [784,784,28,10]   # input and output layers are included, so the number of hidden layers is len-2
-learning_rate = 0.01
+learning_rate = 0.001
 
 weight_matrices = []
 bias_vectors = []
@@ -106,9 +131,12 @@ training_labels = "train-labels-idx1-ubyte"
 testing_dataset = "t10k-images-idx3-ubyte"
 testing_labels = "t10k-labels-idx1-ubyte"
 
+cumulants = check_distribution(datareader(training_dataset,training_labels))
+cumulant_plot(cumulants,cumulants[-1,:],scale_to_sqrtn = True)
+
 # Here, the operator is trusted to not exceed the amount of training data actually included in the database
-training_examples_to_use = 1000
-test_examples_to_use = 50
+training_examples_to_use = 60000
+test_examples_to_use = 100
 
 # First, we will check if the network has already learned from these data and parameters
 # If a saved set by the same name already exists, open and compare it
@@ -119,7 +147,8 @@ try:
         for _ in range(pickle.load(f)):
             prev_result.append(pickle.load(f))
 
-    if [layer_sizes,learning_rate,[training_dataset,testing_dataset],[training_examples_to_use,test_examples_to_use]] == prev_result[0:4]:
+    # If the parameter set equals the currently defined one, the trained weights and biases are loaded  
+    if [layer_sizes,learning_rate,[training_dataset,testing_dataset]] == prev_result[0:3] and training_examples_to_use == prev_result[3][0]:
         print("The network has already been trained for this set of parameters! Skipping to evaluation...")
         trained_network_exists = True
         weight_matrices = prev_result[4]
@@ -174,6 +203,8 @@ if trained_network_exists != True:
         max_mismatches.append(largest_mismatch)        
 
         k += 1
+        if (k % (training_examples_to_use//100) == 0):
+            print("%d %%" % ((100*k)//training_examples_to_use),end='\r')
         if k > training_examples_to_use:
             break
 
@@ -189,12 +220,13 @@ if trained_network_exists != True:
 
 print("Training is finished. Testing network...")
 
-acceptable_diff = 1.0
+""" acceptable_diff = 1.0
 max_iters = 10000
-ideal_zero = hallucinate(acceptable_diff,max_iters,image_dimensions,6,learning_rate,weight_matrices,bias_vectors)
+ideal_zero = hallucinate(acceptable_diff,max_iters,image_dimensions,0,learning_rate,weight_matrices,bias_vectors)
 
 plt.imshow(np.reshape(ideal_zero,(28,28)))
 plt.show()
+exit() """
 
 # Testing
 i_am_confusion = np.zeros((10,10))
@@ -215,7 +247,8 @@ for i in range(10):
         i_am_confusion[i,:] = np.divide(i_am_confusion[i,:],class_numbers[i])
 
 print(i_am_confusion)
+print(class_numbers)
 
-#plt.imshow(i_am_confusion)
-#plt.show()
+plt.imshow(i_am_confusion,cmap="Greys")
+plt.show()
 # evaluation of results, implementation of different hidden layer sizes as well as is to follow.
